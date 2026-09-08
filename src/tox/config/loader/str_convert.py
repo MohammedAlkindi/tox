@@ -54,52 +54,6 @@ class StrConvert(Convert[str]):
                     raise TypeError(msg)
 
     @staticmethod
-    def _win32_process_path_backslash(value: str, escape: str, special_chars: str) -> str:
-        r"""Escape backslash in value that is not followed by a special character.
-
-        This allows windows paths to be written without double backslash, while retaining the POSIX backslash escape
-        semantics for quotes and escapes.
-
-        A backslash pair at the very start of a word, immediately followed by more path text, is the exception: a UNC
-        path (``\\server\share``) or an extended-length path prefix requires exactly two literal leading backslashes, so
-        that leading pair must survive as-is rather than being collapsed the way an interior ``\\`` (the POSIX-escaped
-        form of a single literal backslash) is elsewhere in a path. A bare ``\\`` with nothing (or only whitespace)
-        after it is not a path prefix, and keeps the ordinary collapsing behavior.
-
-        """
-        result = []
-        ix = 0
-        at_word_start = True
-        n = len(value)
-        while ix < n:
-            char = value[ix]
-            if char.isspace():
-                result.append(char)
-                at_word_start = True
-                ix += 1
-                continue
-            starts_backslash_pair = at_word_start and char == escape and value[ix + 1 : ix + 2] == escape
-            if starts_backslash_pair:
-                after_run = value[ix + 2 : ix + 3]
-                if after_run and after_run != escape and not after_run.isspace():
-                    # exactly two leading backslashes starting a word, followed by more text: a UNC/extended-path
-                    # prefix - keep both backslashes literal instead of collapsing them
-                    result.extend((escape * 2, escape * 2))
-                    ix += 2
-                    at_word_start = False
-                    continue
-            result.append(char)
-            at_word_start = False
-            if char == escape:
-                last_char = value[ix - 1 : ix]
-                if last_char != escape:
-                    next_char = value[ix + 1 : ix + 2]
-                    if next_char not in {escape, *special_chars}:
-                        result.append(escape)  # escape escapes that are not themselves escaping a special character
-            ix += 1
-        return "".join(result)
-
-    @staticmethod
     def to_command(value: str) -> Command:
         """At this point, ``value`` has already been substituted out, and all punctuation / escapes are final.
 
@@ -136,6 +90,47 @@ class StrConvert(Convert[str]):
             args[0] = args[0][1:]
             args = ["-", *args]
         return Command(args)
+
+    @staticmethod
+    def _win32_process_path_backslash(value: str, escape: str, special_chars: str) -> str:
+        """Allow Windows paths while retaining shlex quote and backslash escapes."""
+        result: Final[list[str]] = []
+        quote = ""
+        path_start = True
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if quote == "'":
+                result.append(char)
+                if char == quote:
+                    quote = ""
+                path_start = False
+            elif char == escape:
+                following = value[index + 1 : index + 2]
+                if following == escape:
+                    after_pair = value[index + 2 : index + 3]
+                    # UNC prefixes need two literal backslashes; a bare pair still escapes one.
+                    is_prefix = path_start and bool(after_pair) and after_pair not in escape + special_chars + " \t\r\n"
+                    result.append(escape * (4 if is_prefix else 2))
+                    index += 1
+                elif following and following in special_chars:
+                    result.extend((escape, following))
+                    index += 1
+                else:
+                    result.append(escape if value[index - 1 : index] == escape else escape * 2)
+                path_start = False
+            else:
+                result.append(char)
+                if char in special_chars and not quote:
+                    quote = char
+                    path_start = True
+                elif char == quote:
+                    quote = ""
+                    path_start = False
+                else:
+                    path_start = (not quote and char in " \t\r\n") or char == "="
+            index += 1
+        return "".join(result)
 
     @staticmethod
     def to_env_list(value: str) -> EnvList:
